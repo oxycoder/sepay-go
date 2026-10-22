@@ -86,3 +86,42 @@ func TestUnconfirmed(t *testing.T) {
 		t.Error("Unconfirmed() = false")
 	}
 }
+
+func TestWaitReturnsCheckError(t *testing.T) {
+	client, _ := newTestServer(t, notFoundHandler)
+	res, err := client.WaitForIssue(context.Background(), "trk")
+	if !IsNotFound(err) || res != nil {
+		t.Fatalf("res = %v, err = %v", res, err)
+	}
+}
+
+func TestWaitReturnsFailedAsResult(t *testing.T) {
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/invoices/issue/check/trk" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		writeJSON(w, map[string]any{"success": true, "data": map[string]any{"status": "Failed", "message": "x"}})
+	})
+	res, err := client.WaitForIssue(context.Background(), "trk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusFailed || res.Unconfirmed() {
+		t.Errorf("res = %+v", res)
+	}
+}
+
+func TestNextRetryTime(t *testing.T) {
+	bad := "not a time"
+	good := "2026-01-02 03:04:05"
+	if _, ok := (*RetryInfo)(nil).NextRetryTime(); ok {
+		t.Error("nil RetryInfo: ok = true")
+	}
+	if _, ok := (&RetryInfo{NextRetryAt: &bad}).NextRetryTime(); ok {
+		t.Error("malformed: ok = true")
+	}
+	got, ok := (&RetryInfo{NextRetryAt: &good}).NextRetryTime()
+	if want := time.Date(2026, 1, 1, 20, 4, 5, 0, time.UTC); !ok || !got.Equal(want) {
+		t.Errorf("NextRetryTime = %v, %v; want %v", got, ok, want)
+	}
+}
