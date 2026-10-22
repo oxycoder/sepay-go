@@ -5,6 +5,7 @@ Go client for the [SePay](https://sepay.vn) APIs.
 | Package | API |
 | ------- | --- |
 | [`einvoice`](./einvoice) | SePay eInvoice API: create, issue, adjust and replace Vietnamese e-invoices |
+| [`bankhub`](./bankhub) | SePay Bank Hub API: link bank accounts, query transactions, receive balance notifications |
 
 No dependencies outside the standard library. Requires Go 1.22+.
 
@@ -99,3 +100,76 @@ einvoice.IsNotFound(err)
 | `ListBusinessLocations`, `CreateBusinessLocation`, `UpdateBusinessLocation`, `DeleteBusinessLocation` | `/v1/business-locations[/create\|/update\|/delete]` |
 
 The API reference (Vietnamese) is in [docs/einvoice](./docs/einvoice).
+
+## Bank Hub
+
+```go
+import "github.com/oxycoder/sepay-go/bankhub"
+
+client := bankhub.New(clientID, clientSecret)                        // production
+client := bankhub.New(clientID, clientSecret, bankhub.WithSandbox()) // sandbox
+```
+
+Token handling is the same as in `einvoice`. The client gets a token from `POST /v1/token`, caches it for its `ttl`, and fetches a new one when the API returns `401`.
+
+Options: `WithSandbox`, `WithBaseURL`, `WithHTTPClient`, `WithUserAgent`.
+
+### Link a bank account
+
+```go
+company, err := client.CreateCompany(ctx, &bankhub.CreateCompanyRequest{
+	FullName: "Công ty TNHH ABC",
+	Status:   bankhub.CompanyActive,
+})
+
+link, err := client.CreateLinkToken(ctx, &bankhub.CreateLinkTokenRequest{
+	CompanyXID: company.XID,
+	Purpose:    bankhub.PurposeLink, // PurposeUnlink / PurposeReactivate need BankAccountXID
+})
+// Open link.HostedLinkURL in an iframe or WebView.
+```
+
+### Receive notifications
+
+SePay sends two kinds of notifications. Both handlers check the credential with a constant-time compare, reply in the format SePay expects, and return `500` when your function returns an error.
+
+```go
+// Balance changes (new transactions). SePay sends "Authorization: Apikey {key}".
+mux.Handle("/sepay/ipn", bankhub.IPNHandler(apiKey, func(ctx context.Context, ipn *bankhub.IPN) error {
+	// SePay can send the same IPN more than once. Skip IDs you have already processed.
+	return processPayment(ctx, ipn.TransactionID, ipn.PaymentCode, float64(ipn.Amount))
+}))
+
+// Link lifecycle events. SePay sends the secret from UpsertWebhook in X-Secret-Key.
+mux.Handle("/sepay/events", bankhub.EventHandler(secretKey, func(ctx context.Context, e *bankhub.Event) error {
+	if e.Event == bankhub.EventBankAccountLinked { /* e.Metadata.BankAccountXID */ }
+	return nil
+}))
+```
+
+If you check the request yourself, use `bankhub.ParseIPN` and `bankhub.ParseEvent`. In the sandbox, `client.SimulateTransaction` sends a test IPN.
+
+A company receives IPNs only when its status is `Active`, `active` is `1`, and its `transaction_amount` is above 0 or `Unlimited`. Set these with `UpdateCompany`.
+
+### Errors
+
+API errors are `*bankhub.APIError` with `StatusCode`, `Message` and, for validation errors, a per-field `Errors` map. Use `bankhub.IsNotFound(err)` and `bankhub.IsValidationError(err)` to check for common cases.
+
+### Endpoints
+
+| Method | Endpoint |
+| ------ | -------- |
+| `CreateLinkToken`, `GetLinkToken`, `RevokeLinkToken` | `POST /v1/link-token/{create,get,revoke}` |
+| `ListCompanies`, `GetCompany` | `GET /v1/company[/{xid}]` |
+| `CreateCompany` | `POST /v1/company/create` |
+| `UpdateCompany` | `POST /v1/company/edit/{xid}` |
+| `GetCompanyCounter` | `GET /v1/company/counter/{xid}` |
+| `ListBankAccounts`, `GetBankAccount` | `GET /v1/bank-account[/{xid}]` |
+| `ListTransactions`, `GetTransaction` | `GET /v1/transaction[/{transaction_id}]` |
+| `SimulateTransaction` | `POST /v1/transaction/create` (sandbox only) |
+| `GetMerchantConfig`, `UpdateMerchantConfig` | `GET`/`POST /v1/merchant-config` |
+| `UploadMerchantLogo` | `POST /v1/merchant-config/logo` (multipart, PNG/JPEG ≤ 1MB) |
+| `GetMerchantCounter` | `GET /v1/merchant-config/counter` |
+| `GetWebhook`, `UpsertWebhook` | `GET`/`POST /v1/webhook` |
+
+The API reference (Vietnamese) is in [docs/bankhub](./docs/bankhub).
