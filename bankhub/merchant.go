@@ -71,16 +71,13 @@ func (c *Client) UploadMerchantLogo(ctx context.Context, filename string, logo i
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="logo"; filename=%q`, filepath.Base(filename)))
 	h.Set("Content-Type", contentType)
-	part, err := mw.CreatePart(h)
-	if err != nil {
-		return "", fmt.Errorf("bankhub: encode logo: %w", err)
-	}
+	// CreatePart and Close only fail when writing to buf fails, which a
+	// bytes.Buffer never does.
+	part, _ := mw.CreatePart(h)
 	if _, err := io.Copy(part, logo); err != nil {
 		return "", fmt.Errorf("bankhub: read logo: %w", err)
 	}
-	if err := mw.Close(); err != nil {
-		return "", fmt.Errorf("bankhub: encode logo: %w", err)
-	}
+	mw.Close()
 
 	raw, err := c.callBody(ctx, http.MethodPost, "/v1/merchant-config/logo", nil,
 		&body{contentType: mw.FormDataContentType(), data: buf.Bytes()})
