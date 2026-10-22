@@ -7,6 +7,7 @@ Go client for the [SePay](https://sepay.vn) APIs.
 | [`einvoice`](./einvoice) | SePay eInvoice API: create, issue, adjust and replace Vietnamese e-invoices |
 | [`bankhub`](./bankhub) | SePay Bank Hub API: link bank accounts, query transactions, receive balance notifications |
 | [`webhook`](./webhook) | SePay Webhooks: receive and verify transaction notifications for your linked bank accounts |
+| [`paymentgateway`](./paymentgateway) | SePay Payment Gateway: signed checkout forms (VietQR, NAPAS QR, cards), IPN, order lookup, cancel and void |
 
 No dependencies outside the standard library. Requires Go 1.22+.
 
@@ -210,3 +211,67 @@ Responses: `200` when your function returns nil; `401` for a bad credential, `40
 `tx.Raw` holds the body exactly as received; store it for audits. `tx.Time()` parses `TransactionDate` in Vietnam time. With another router, call `webhook.VerifySignature` (or `VerifyAPIKey`) on the raw body, then `webhook.Parse`. `webhook.Sign` builds a valid signature for your tests.
 
 The guide (Vietnamese) is in [docs/webhook](./docs/webhook).
+
+## Payment Gateway
+
+```go
+import "github.com/oxycoder/sepay-go/paymentgateway"
+
+client := paymentgateway.New(merchantID, secretKey)                               // production
+client := paymentgateway.New(merchantID, secretKey, paymentgateway.WithSandbox()) // sandbox
+```
+
+`WithSandbox` switches both hosts: the REST API (`pgapi-sandbox.sepay.vn`) and the checkout page (`pay-sandbox.sepay.vn`). Sandbox and production use different `merchant_id`/`secret_key` pairs.
+
+Options: `WithSandbox`, `WithBaseURL`, `WithCheckoutURL`, `WithHTTPClient`, `WithUserAgent`.
+
+### Send the customer to checkout
+
+The checkout is an HTML form the customer's browser POSTs to `/v1/checkout/init`. `NewCheckout` validates the request, fills in `merchant`, `currency` (VND) and `operation` (PURCHASE), and signs the fields in the order SePay expects. It makes no network call.
+
+```go
+form, err := client.NewCheckout(&paymentgateway.CheckoutRequest{
+	OrderInvoiceNumber: "INV-1001", // unique; IPNs, CancelOrder and VoidTransaction refer to it
+	OrderAmount:        100000,     // VND
+	OrderDescription:   "Thanh toán đơn hàng #1001",
+	PaymentMethod:      paymentgateway.PaymentBankTransfer, // optional; empty lets the customer choose
+	SuccessURL:         "https://example.com/payment/success",
+	ErrorURL:           "https://example.com/payment/error",
+	CancelURL:          "https://example.com/payment/cancel",
+})
+io.WriteString(w, form.HTML("Thanh toán")) // or render form.Action + form.Fields in your own template, in order
+```
+
+If you build the form yourself, `paymentgateway.Sign(fields, secretKey)` computes the signature.
+
+### Confirm payments with the IPN
+
+Don't mark an order paid from `SuccessURL`: the customer may close the browser before the redirect. SePay POSTs an IPN to the URL set at my.sepay.vn → Cổng thanh toán → Cấu hình → IPN.
+
+```go
+mux.Handle("/sepay/ipn", paymentgateway.IPNHandler(secretKey, func(ctx context.Context, ipn *paymentgateway.IPN) error {
+	// SePay can send the same IPN more than once: make this idempotent.
+	if ipn.NotificationType == paymentgateway.NotificationOrderPaid {
+		return orders.MarkPaid(ctx, ipn.Order.OrderInvoiceNumber, float64(ipn.Order.OrderAmount))
+	}
+	return nil
+}))
+```
+
+The handler checks `X-Secret-Key` with a constant-time compare (pass `""` if the IPN auth type is not `SECRET_KEY`) and answers `{"success": true}`. It returns `401` for a bad key, `400` for an unreadable body and `500` when your function returns an error. With another router, call `paymentgateway.VerifyIPN` and `paymentgateway.ParseIPN`.
+
+### Errors
+
+API errors are `*paymentgateway.APIError` with `StatusCode`, `Message` and, for validation errors, a per-field `Errors` map. Use `paymentgateway.IsNotFound`, `IsValidationError` (400/422) and `IsRateLimited` (429) to check for common cases. Times such as `Order.CreatedAt` are Vietnam time; parse them with `paymentgateway.ParseTime`.
+
+### Endpoints
+
+| Method | Endpoint |
+| ------ | -------- |
+| `NewCheckout`, `Sign` | form `POST {checkout}/v1/checkout/init` (no API call) |
+| `ListOrders` | `GET /v1/order` |
+| `GetOrder` | `GET /v1/order/detail/{order_id}` |
+| `CancelOrder` | `POST /v1/order/cancel` (unpaid bank transfer / NAPAS orders) |
+| `VoidTransaction` | `POST /v1/order/voidTransaction` (captured card payments, before settlement) |
+
+The API reference (Vietnamese) is in [docs/payment-gateway](./docs/payment-gateway).
