@@ -165,3 +165,151 @@ func TestDownloadInvoiceDecodesBase64(t *testing.T) {
 		t.Errorf("file = %+v", f)
 	}
 }
+
+func TestAdjustInvoice(t *testing.T) {
+	var got map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/invoices/adjust" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		writeJSON(w, map[string]any{"success": true, "data": map[string]any{"tracking_code": "adj-1"}})
+	})
+	res, err := client.AdjustInvoice(context.Background(), &AdjustInvoiceRequest{
+		ProviderAccountID:            "acc",
+		OriginalInvoiceReferenceCode: "ref-1",
+		AdjustmentType:               AdjustInfo,
+		IssuedDate:                   time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC),
+		Buyer:                        &Buyer{Name: "B"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TrackingCode != "adj-1" {
+		t.Errorf("TrackingCode = %q", res.TrackingCode)
+	}
+	if got["issued_date"] != "2026-03-01 10:00:00" || got["original_invoice_reference_code"] != "ref-1" {
+		t.Errorf("body = %v", got)
+	}
+	if buyer, ok := got["buyer"].(map[string]any); !ok || buyer["name"] != "B" {
+		t.Errorf("buyer = %v", got["buyer"])
+	}
+}
+
+func TestReplaceInvoice(t *testing.T) {
+	var got map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/invoices/replace" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		writeJSON(w, map[string]any{"success": true, "data": map[string]any{"tracking_code": "rep-1"}})
+	})
+	res, err := client.ReplaceInvoice(context.Background(), &ReplaceInvoiceRequest{
+		ProviderAccountID:            "acc",
+		OriginalInvoiceReferenceCode: "ref-1",
+		IssuedDate:                   time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC),
+		Buyer:                        Buyer{Name: "B"},
+		Items:                        []Item{{ItemName: "x", Quantity: 1, UnitPrice: 10}},
+		TotalAmount:                  Ptr(int64(11)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TrackingCode != "rep-1" {
+		t.Errorf("TrackingCode = %q", res.TrackingCode)
+	}
+	if got["issued_date"] != "2026-03-01 10:00:00" || got["total_amount"] != float64(11) || got["is_draft"] != false {
+		t.Errorf("body = %v", got)
+	}
+}
+
+func TestReplaceOmitsZeroIssuedDate(t *testing.T) {
+	b, err := json.Marshal(&ReplaceInvoiceRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	json.Unmarshal(b, &got)
+	if _, ok := got["issued_date"]; ok {
+		t.Errorf("issued_date should be omitted: %s", b)
+	}
+	if _, ok := got["currency"]; ok {
+		t.Errorf("currency should be omitted when empty: %s", b)
+	}
+}
+
+func TestDeleteDraftInvoice(t *testing.T) {
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/invoices/delete/ref-1" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Content-Type") != "" {
+			t.Error("Content-Type set without a body")
+		}
+		io.WriteString(w, `{"success":true}`)
+	})
+	if err := client.DeleteDraftInvoice(context.Background(), "ref-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListInvoicesSellerStoreAndNilParams(t *testing.T) {
+	var queries []string
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		io.WriteString(w, `{"success":true,"data":{"items":[]}}`)
+	})
+	ctx := context.Background()
+	if _, err := client.ListInvoices(ctx, &ListInvoicesParams{SellerStoreXID: "x1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ListInvoices(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 2 || queries[0] != "seller_store_xid=x1" || queries[1] != "" {
+		t.Errorf("queries = %q", queries)
+	}
+}
+
+func TestInvoiceEndpointsReturnErrors(t *testing.T) {
+	client, _ := newTestServer(t, notFoundHandler)
+	ctx := context.Background()
+
+	check := func(name string, res any, err error) {
+		t.Helper()
+		if !IsNotFound(err) {
+			t.Errorf("%s err = %v", name, err)
+		}
+		if res != nil {
+			t.Errorf("%s res = %v, want nil", name, res)
+		}
+	}
+	res1, err := client.CreateInvoice(ctx, &CreateInvoiceRequest{})
+	check("CreateInvoice", nilIfNil(res1), err)
+	res2, err := client.AdjustInvoice(ctx, &AdjustInvoiceRequest{})
+	check("AdjustInvoice", nilIfNil(res2), err)
+	res3, err := client.ReplaceInvoice(ctx, &ReplaceInvoiceRequest{})
+	check("ReplaceInvoice", nilIfNil(res3), err)
+	res4, err := client.IssueInvoice(ctx, "ref")
+	check("IssueInvoice", nilIfNil(res4), err)
+	res5, err := client.GetCreateStatus(ctx, "trk")
+	check("GetCreateStatus", nilIfNil(res5), err)
+	res6, err := client.GetIssueStatus(ctx, "trk")
+	check("GetIssueStatus", nilIfNil(res6), err)
+	res7, err := client.ListInvoices(ctx, nil)
+	check("ListInvoices", nilIfNil(res7), err)
+	res8, err := client.DownloadInvoice(ctx, "trk", FileXML)
+	check("DownloadInvoice", nilIfNil(res8), err)
+	res9, err := client.GetUsage(ctx)
+	check("GetUsage", nilIfNil(res9), err)
+	check("DeleteDraftInvoice", nil, client.DeleteDraftInvoice(ctx, "ref"))
+}
+
+// nilIfNil turns a typed nil pointer into an untyped nil so it compares equal to nil as any.
+func nilIfNil[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return p
+}
