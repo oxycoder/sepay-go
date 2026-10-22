@@ -6,6 +6,7 @@ Go client for the [SePay](https://sepay.vn) APIs.
 | ------- | --- |
 | [`einvoice`](./einvoice) | SePay eInvoice API: create, issue, adjust and replace Vietnamese e-invoices |
 | [`bankhub`](./bankhub) | SePay Bank Hub API: link bank accounts, query transactions, receive balance notifications |
+| [`webhook`](./webhook) | SePay Webhooks: receive and verify transaction notifications for your linked bank accounts |
 
 No dependencies outside the standard library. Requires Go 1.22+.
 
@@ -173,3 +174,39 @@ API errors are `*bankhub.APIError` with `StatusCode`, `Message` and, for validat
 | `GetWebhook`, `UpsertWebhook` | `GET`/`POST /v1/webhook` |
 
 The API reference (Vietnamese) is in [docs/bankhub](./docs/bankhub).
+
+## Webhooks
+
+```go
+import "github.com/oxycoder/sepay-go/webhook"
+```
+
+SePay sends an HTTP POST to your URL for every new transaction on a linked bank account. `webhook.Handler` checks the credential, decodes the body (JSON, form-urlencoded or multipart), calls your function and replies `{"success": true}`.
+
+```go
+mux.Handle("/sepay/webhook", webhook.Handler(
+	func(ctx context.Context, tx *webhook.Transaction) error {
+		// SePay can send the same transaction more than once (retries, manual replays). Dedupe on tx.ID.
+		if tx.TransferType == webhook.TransferIn && tx.Code != "" {
+			return orders.MarkPaid(ctx, tx.ID, tx.Code, tx.TransferAmount)
+		}
+		return nil
+	},
+	webhook.WithHMAC(os.Getenv("SEPAY_WEBHOOK_SECRET")),
+))
+```
+
+Pick the option that matches the authentication set on the webhook:
+
+| Authentication | Option | What is checked |
+| -------------- | ------ | --------------- |
+| HMAC-SHA256 (recommended) | `WithHMAC(secret)` | `X-SePay-Signature` = `sha256=HMAC(secret, "{timestamp}.{raw body}")`, and `X-SePay-Timestamp` within 5 minutes (`WithTolerance` to change) |
+| API Key | `WithAPIKey(key)` | `Authorization: Apikey {key}` |
+| OAuth 2.0 | `WithBearer(func(ctx, token) bool)` | `Authorization: Bearer {token}` accepted by your function |
+| None | no option | nothing; local testing only |
+
+Responses: `200` when your function returns nil; `401` for a bad credential, `400` for an unreadable body and `500` when your function returns an error. SePay retries any non-2xx response up to 7 times over about 33 minutes, and waits at most 30 seconds for a reply, so push slow work to a queue.
+
+`tx.Raw` holds the body exactly as received; store it for audits. `tx.Time()` parses `TransactionDate` in Vietnam time. With another router, call `webhook.VerifySignature` (or `VerifyAPIKey`) on the raw body, then `webhook.Parse`. `webhook.Sign` builds a valid signature for your tests.
+
+The guide (Vietnamese) is in [docs/webhook](./docs/webhook).
