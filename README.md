@@ -54,7 +54,7 @@ if err != nil { ... }
 status, err := client.WaitForCreate(ctx, res.TrackingCode) // polls until Success or Failed
 ```
 
-`IssuedDate` defaults to now and is always sent in Vietnam time (`YYYY-MM-DD HH:mm:ss`). Optional fields where zero means something (`TaxRate`, `TaxAmount`, `TotalAmount`, `SubAmount`, `Amount`) are pointers. Set them with `einvoice.Ptr`.
+`IssuedDate` defaults to now and is always sent in Vietnam time (`YYYY-MM-DD HH:mm:ss`). SePay only returns the date, so the exact time sent is kept on `res.IssuedDate` for create, adjust and replace; store it if you need the time. Optional fields where zero means something (`TaxRate`, `TaxAmount`, `TotalAmount`, `SubAmount`, `Amount`) are pointers. Set them with `einvoice.Ptr`.
 
 ### Asynchronous processing
 
