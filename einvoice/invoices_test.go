@@ -47,6 +47,9 @@ func TestCreateInvoiceRequestEncoding(t *testing.T) {
 	if got["issued_date"] != "2026-01-26 01:30:00" {
 		t.Errorf("issued_date = %v", got["issued_date"])
 	}
+	if !res.IssuedDate.Equal(issued) || res.IssuedDate.Location() != vnZone {
+		t.Errorf("res.IssuedDate = %v, want %v in Vietnam time", res.IssuedDate, issued)
+	}
 	if got["is_draft"] != false {
 		t.Errorf("is_draft = %v, want explicit false", got["is_draft"])
 	}
@@ -188,6 +191,9 @@ func TestAdjustInvoice(t *testing.T) {
 	if res.TrackingCode != "adj-1" {
 		t.Errorf("TrackingCode = %q", res.TrackingCode)
 	}
+	if !res.IssuedDate.Equal(time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC)) {
+		t.Errorf("res.IssuedDate = %v", res.IssuedDate)
+	}
 	if got["issued_date"] != "2026-03-01 10:00:00" || got["original_invoice_reference_code"] != "ref-1" {
 		t.Errorf("body = %v", got)
 	}
@@ -221,6 +227,43 @@ func TestReplaceInvoice(t *testing.T) {
 	}
 	if got["issued_date"] != "2026-03-01 10:00:00" || got["total_amount"] != float64(11) || got["is_draft"] != false {
 		t.Errorf("body = %v", got)
+	}
+}
+
+func TestSubmitDefaultsIssuedDateToNow(t *testing.T) {
+	var sent []string
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]any
+		json.NewDecoder(r.Body).Decode(&got)
+		s, _ := got["issued_date"].(string)
+		sent = append(sent, s)
+		writeJSON(w, map[string]any{"success": true, "data": map[string]any{"tracking_code": "t"}})
+	})
+	ctx := context.Background()
+	before := time.Now().Truncate(time.Second)
+	submit := []func() (*TrackingResult, error){
+		func() (*TrackingResult, error) {
+			return client.CreateInvoice(ctx, &CreateInvoiceRequest{})
+		},
+		func() (*TrackingResult, error) {
+			return client.AdjustInvoice(ctx, &AdjustInvoiceRequest{})
+		},
+		func() (*TrackingResult, error) {
+			return client.ReplaceInvoice(ctx, &ReplaceInvoiceRequest{})
+		},
+	}
+	for i, f := range submit {
+		res, err := f()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := res.IssuedDate
+		if ts.Before(before) || ts.After(time.Now()) || ts.Nanosecond() != 0 {
+			t.Errorf("%d: IssuedDate %v is not now to the second", i, ts)
+		}
+		if sent[i] != ts.Format(dateTimeLayout) || ts.Location() != vnZone {
+			t.Errorf("%d: sent %q, result %v", i, sent[i], ts)
+		}
 	}
 }
 

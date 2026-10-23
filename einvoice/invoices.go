@@ -69,7 +69,7 @@ type AdjustInvoiceRequest struct {
 	ProviderAccountID            string         `json:"provider_account_id"`
 	OriginalInvoiceReferenceCode string         `json:"original_invoice_reference_code"`
 	AdjustmentType               AdjustmentType `json:"adjustment_type"`
-	IssuedDate                   time.Time      `json:"issued_date"` // optional; must be today
+	IssuedDate                   time.Time      `json:"issued_date"` // must be today; zero means time.Now()
 	ReferenceCode                string         `json:"reference_code,omitempty"`
 	PaymentMethod                PaymentMethod  `json:"payment_method,omitempty"` // defaults to the original's
 	IsDraft                      bool           `json:"is_draft"`
@@ -94,7 +94,7 @@ func (r AdjustInvoiceRequest) MarshalJSON() ([]byte, error) {
 type ReplaceInvoiceRequest struct {
 	ProviderAccountID            string        `json:"provider_account_id"`
 	OriginalInvoiceReferenceCode string        `json:"original_invoice_reference_code"`
-	IssuedDate                   time.Time     `json:"issued_date"` // optional; must be today
+	IssuedDate                   time.Time     `json:"issued_date"` // must be today; zero means time.Now()
 	ReferenceCode                string        `json:"reference_code,omitempty"`
 	Currency                     Currency      `json:"currency,omitempty"`       // defaults to the original's
 	PaymentMethod                PaymentMethod `json:"payment_method,omitempty"` // defaults to the original's
@@ -121,6 +121,10 @@ type TrackingResult struct {
 	TrackingCode string `json:"tracking_code"`
 	TrackingURL  string `json:"tracking_url"`
 	Message      string `json:"message"`
+	// IssuedDate is the issued_date sent with a create, adjust or replace
+	// request, in Vietnam time to the second. SePay only returns the date
+	// (Invoice.IssuedDate), so keep this if you need the time. Zero for IssueInvoice.
+	IssuedDate time.Time `json:"-"`
 }
 
 // Invoice is an invoice as returned by the status, detail and list endpoints.
@@ -222,30 +226,43 @@ type InvoiceFile struct {
 // CreateInvoice submits an invoice (draft or issued, per IsDraft).
 // Poll the result with WaitForCreate or GetCreateStatus.
 func (c *Client) CreateInvoice(ctx context.Context, req *CreateInvoiceRequest) (*TrackingResult, error) {
-	var out TrackingResult
-	if err := c.do(ctx, http.MethodPost, "/v1/invoices/create", nil, req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	r := *req
+	r.IssuedDate = issuedAt(r.IssuedDate)
+	return c.submit(ctx, "/v1/invoices/create", &r, r.IssuedDate)
 }
 
 // AdjustInvoice creates an adjustment invoice for an issued invoice.
 // Poll the result with WaitForCreate or GetCreateStatus.
 func (c *Client) AdjustInvoice(ctx context.Context, req *AdjustInvoiceRequest) (*TrackingResult, error) {
-	var out TrackingResult
-	if err := c.do(ctx, http.MethodPost, "/v1/invoices/adjust", nil, req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	r := *req
+	r.IssuedDate = issuedAt(r.IssuedDate)
+	return c.submit(ctx, "/v1/invoices/adjust", &r, r.IssuedDate)
 }
 
 // ReplaceInvoice creates a replacement for an issued invoice.
 // Poll the result with WaitForCreate or GetCreateStatus.
 func (c *Client) ReplaceInvoice(ctx context.Context, req *ReplaceInvoiceRequest) (*TrackingResult, error) {
+	r := *req
+	r.IssuedDate = issuedAt(r.IssuedDate)
+	return c.submit(ctx, "/v1/invoices/replace", &r, r.IssuedDate)
+}
+
+// issuedAt returns t, or now when zero, as the API receives it: Vietnam time,
+// whole seconds.
+func issuedAt(t time.Time) time.Time {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	return t.In(vnZone).Truncate(time.Second)
+}
+
+// submit posts a create, adjust or replace request and records issued on the result.
+func (c *Client) submit(ctx context.Context, path string, body any, issued time.Time) (*TrackingResult, error) {
 	var out TrackingResult
-	if err := c.do(ctx, http.MethodPost, "/v1/invoices/replace", nil, req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, path, nil, body, &out); err != nil {
 		return nil, err
 	}
+	out.IssuedDate = issued
 	return &out, nil
 }
 
